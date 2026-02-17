@@ -1,0 +1,3 @@
+Alembic migrations live here. Use `alembic revision --autogenerate -m "msg"` then `alembic upgrade head`.
+
+Note: alembic/env.py converts the async DB URL to a sync one for migrations by stripping `+asyncpg`.
