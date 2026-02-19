@@ -16,6 +16,8 @@ class User(Base):
 
     # stored hashed password, not plain password
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    # optional Codeforces handle
+    handle: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, unique=True)
 
     # record creation timestamp with DB default
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
