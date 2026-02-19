@@ -1,2 +1,4 @@
 # place your ORM models here (keep business logic out of models)
-__all__ = []
+from .user import User
+
+__all__ = ["User"]
