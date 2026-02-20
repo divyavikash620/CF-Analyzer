@@ -12,38 +12,33 @@ async def compute_tag_accuracy(user_id: int, db: AsyncSession) -> Dict[str, Dict
     """Group submissions by tag and compute solved/attempted ratio per tag.
 
     Returns a mapping: tag -> {attempted:int, solved:int, accuracy:float}
+    Uses SQL aggregation with unnest to avoid Python loops.
     """
     # resolve user's handle
     q = await db.execute(select(User.handle).where(User.id == user_id))
-    row = q.scalar_one_or_none()
-    if not row:
+    handle = q.scalar_one_or_none()
+    if not handle:
         return {}
-    handle = row
 
-    # fetch submissions joined with problem tags
+    # use SQL aggregation with unnest to expand array tags and group by individual tag
     stmt = (
-        select(Submission.verdict, Problem.tags)
+        select(
+            func.unnest(Problem.tags).label("tag"),
+            func.count(Submission.id).label("attempted"),
+            func.sum(case(((Submission.verdict == "OK", 1)), else_=0)).label("solved"),
+        )
         .join(Problem, (Submission.problem_contest_id == Problem.contest_id) & (Submission.problem_index == Problem.index))
         .where(Submission.author_handle == handle)
+        .group_by("tag")
     )
+
     res = await db.execute(stmt)
     rows = res.fetchall()
 
-    stats: Dict[str, Dict[str, int]] = {}
-    for verdict, tags in rows:
-        if not tags:
-            continue
-        for tag in tags:
-            entry = stats.setdefault(tag, {"attempted": 0, "solved": 0})
-            entry["attempted"] += 1
-            if verdict == "OK":
-                entry["solved"] += 1
-
-    # compute accuracy
     result: Dict[str, Dict[str, Any]] = {}
-    for tag, v in stats.items():
-        attempted = v["attempted"]
-        solved = v["solved"]
+    for tag, attempted, solved in rows:
+        attempted = int(attempted)
+        solved = int(solved or 0)
         accuracy = solved / attempted if attempted else 0.0
         result[tag] = {"attempted": attempted, "solved": solved, "accuracy": accuracy}
 

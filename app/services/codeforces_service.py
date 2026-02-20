@@ -1,9 +1,8 @@
 import logging
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import select, tuple_, update as sa_update
+from sqlalchemy import select, update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.codeforces import make_codeforces_client, CodeforcesAPIError
@@ -14,130 +13,158 @@ from app.models.user import User
 logger = logging.getLogger("app.services.codeforces")
 
 
+def _submission_id(raw_submission: Dict[str, Any]) -> Optional[int]:
+    sid = raw_submission.get("id") or raw_submission.get("submissionId")
+    if sid is None:
+        return None
+    try:
+        return int(sid)
+    except (TypeError, ValueError):
+        return None
+
+
 async def sync_user_submissions(handle: str, db: AsyncSession, batch_size: int = 200) -> int:
-    """Fetch submissions for `handle` from Codeforces and persist new problems
-    and submissions. Commits in batches. Returns number of new submissions added.
+    """Fetch and upsert new Codeforces submissions for a local user."""
+    async with db.begin():
+        user_row = (
+            await db.execute(
+                select(User.id, User.last_synced_submission_id).where(User.handle == handle)
+            )
+        ).first()
 
-    Note: this function creates a short-lived Codeforces client internally.
-    """
-    async with make_codeforces_client() as client:
-        # obtain last synced submission id for this user (if any)
-        stmt = select(User.last_synced_submission_id).where(User.handle == handle)
-        res = await db.execute(stmt)
-        row = res.fetchone()
-        last_synced_id = row[0] if row else None
+    if user_row is None:
+        logger.warning("sync_user_submissions: user not found for handle=%s", handle)
+        return 0
 
-        # request only new submissions by passing last_synced_id as `from_`
-        from_param = int(last_synced_id) if last_synced_id is not None else 1
+    user_id, last_synced_submission_id = user_row
+
+    # Codeforces `from` is an offset, not a submission id. We fetch pages and stop
+    # once we reach entries at or below the last synced submission id.
+    page_size = 1000
+    page_from = 1
+    newest_seen_id = int(last_synced_submission_id) if last_synced_submission_id is not None else None
+    fetched_new_submissions: List[Tuple[Dict[str, Any], int]] = []
+
+    client = make_codeforces_client()
+    try:
+        while True:
+            page_raw = await client.get_user_submissions(handle, from_=page_from, count=page_size)
+            page = page_raw if isinstance(page_raw, list) else []
+            if not page:
+                break
+
+            hit_previous_sync = False
+            for submission in page:
+                sid = _submission_id(submission)
+                if sid is None:
+                    continue
+
+                if newest_seen_id is None or sid > newest_seen_id:
+                    newest_seen_id = sid
+
+                if last_synced_submission_id is None or sid > int(last_synced_submission_id):
+                    fetched_new_submissions.append((submission, sid))
+                else:
+                    hit_previous_sync = True
+
+            if hit_previous_sync or len(page) < page_size:
+                break
+
+            page_from += page_size
+    except CodeforcesAPIError as exc:
+        logger.error("failed to fetch submissions for %s: %s", handle, exc)
+        raise
+    finally:
         try:
-            raw = await client.get_user_submissions(handle, from_=from_param)
-        except CodeforcesAPIError as exc:
-            logger.error("failed to fetch submissions for %s: %s", handle, exc)
-            raise
+            await client.close()
+        except Exception:  # noqa: BLE001 - avoid masking upstream exceptions
+            logger.exception("failed to close Codeforces client for handle=%s", handle)
 
-    # normalize raw -> list of submissions
-    submissions = raw if isinstance(raw, list) else []
-        if not submissions:
-            return 0
+    problem_examples: Dict[Tuple[int, str], Dict[str, Any]] = {}
+    submissions_by_id: Dict[int, Dict[str, Any]] = {}
 
-    # collect problem keys and submission ids
-    problem_keys: List[Tuple[int, str]] = []
-    submission_ids: List[int] = []
-    submission_rows = []
-    problem_example: dict = {}
+    for raw_submission, sid in fetched_new_submissions:
+        problem = raw_submission.get("problem", {})
+        contest_id = problem.get("contestId")
+        index = problem.get("index")
 
-    for s in submissions:
-        sid = s.get("id") or s.get("submissionId") or s.get("submissionId")
-        if sid is None:
-            continue
-        submission_ids.append(int(sid))
-        prob = s.get("problem", {})
-        contest_id = prob.get("contestId")
-        index = prob.get("index")
         if contest_id is not None and index is not None:
-            problem_keys.append((int(contest_id), index))
-            # keep a representative problem payload for enrichment
-            problem_example[(int(contest_id), index)] = prob
+            key = (int(contest_id), str(index))
+            problem_examples[key] = problem
 
-        submission_rows.append((s, int(sid)))
+        author_handle = handle
+        author = raw_submission.get("author")
+        if isinstance(author, dict):
+            members = author.get("members") or []
+            if members and isinstance(members[0], dict) and members[0].get("handle"):
+                author_handle = str(members[0]["handle"])
 
-    # deduplicate problem keys
-    problem_keys = list(dict.fromkeys(problem_keys))
+        submissions_by_id[sid] = {
+            "id": sid,
+            "user_id": int(user_id),
+            "contest_id": int(raw_submission.get("contestId")) if raw_submission.get("contestId") is not None else None,
+            "creation_time_seconds": int(raw_submission.get("creationTimeSeconds", 0)),
+            "relative_time_seconds": (
+                int(raw_submission.get("relativeTimeSeconds"))
+                if raw_submission.get("relativeTimeSeconds") is not None
+                else None
+            ),
+            "author_handle": author_handle,
+            "problem_contest_id": int(contest_id) if contest_id is not None else None,
+            "problem_index": str(index) if index is not None else None,
+            "verdict": raw_submission.get("verdict"),
+            "test_count": int(raw_submission.get("passedTestCount")) if raw_submission.get("passedTestCount") is not None else None,
+            "time_consumed_ms": (
+                int(raw_submission.get("timeConsumedMillis"))
+                if raw_submission.get("timeConsumedMillis") is not None
+                else None
+            ),
+        }
 
-    # prepare problem rows (no pre-existence checks) and insert using
-    # PostgreSQL ON CONFLICT DO NOTHING on the composite primary key
-    problem_rows = []
-    for (cid, idx) in problem_keys:
-        rep = problem_example.get((cid, idx), {})
-        name = rep.get("name")
-        rating = rep.get("rating")
-        tags = rep.get("tags")
-        problem_rows.append({
-            "contest_id": cid,
-            "index": idx,
-            "name": name,
-            "rating": rating,
-            "tags": tags,
-        })
+    problem_rows = [
+        {
+            "contest_id": contest_id,
+            "index": index,
+            "name": problem.get("name"),
+            "rating": problem.get("rating"),
+            "tags": problem.get("tags"),
+        }
+        for (contest_id, index), problem in problem_examples.items()
+    ]
+    submission_rows = list(submissions_by_id.values())
 
-    if problem_rows:
-        # insert in batches, committing once per batch
+    inserted_count = 0
+    async with db.begin():
         for i in range(0, len(problem_rows), batch_size):
             batch = problem_rows[i : i + batch_size]
-            stmt = (
+            if not batch:
+                continue
+            await db.execute(
                 pg_insert(Problem.__table__)
                 .values(batch)
                 .on_conflict_do_nothing(index_elements=["contest_id", "index"])
             )
-            async with db.begin():
-                await db.execute(stmt)
 
-    # prepare dict rows for bulk upsert (dedupe by id to avoid intra-batch conflicts)
-    rows_by_id = {}
-    for raw_s, sid in submission_rows:
-        prob = raw_s.get("problem", {})
-        contest_id = prob.get("contestId")
-        index = prob.get("index")
-        rows_by_id[sid] = {
-            "id": int(sid),
-            "contest_id": int(raw_s.get("contestId")) if raw_s.get("contestId") is not None else None,
-            "creation_time_seconds": int(raw_s.get("creationTimeSeconds", 0)),
-            "relative_time_seconds": raw_s.get("relativeTimeSeconds"),
-            "author_handle": (raw_s.get("author", {}).get("members", [{}])[0].get("handle") if raw_s.get("author") else handle),
-            "problem_contest_id": int(contest_id) if contest_id is not None else None,
-            "problem_index": index,
-            "verdict": raw_s.get("verdict"),
-            "test_count": (int(raw_s.get("passedTestCount")) if raw_s.get("passedTestCount") is not None else None),
-            "time_consumed_ms": (int(raw_s.get("timeConsumedMillis")) if raw_s.get("timeConsumedMillis") is not None else None),
-        }
+        for i in range(0, len(submission_rows), batch_size):
+            batch = submission_rows[i : i + batch_size]
+            if not batch:
+                continue
+            inserted = await db.execute(
+                pg_insert(Submission.__table__)
+                .values(batch)
+                .on_conflict_do_nothing(index_elements=["id"])
+                .returning(Submission.id)
+            )
+            inserted_count += len(inserted.fetchall())
 
-    to_insert_rows = list(rows_by_id.values())
+        if newest_seen_id is not None and (
+            last_synced_submission_id is None or int(newest_seen_id) > int(last_synced_submission_id)
+        ):
+            await db.execute(
+                sa_update(User)
+                .where(User.id == int(user_id))
+                .values(last_synced_submission_id=int(newest_seen_id))
+            )
 
-    added = 0
-    if to_insert_rows:
-        # perform a single transactional bulk insert that ignores conflicts on primary key
-        stmt = (
-            pg_insert(Submission.__table__)
-            .values(to_insert_rows)
-            .on_conflict_do_nothing(index_elements=["id"])
-            .returning(Submission.id)
-        )
-        async with db.begin():
-            res = await db.execute(stmt)
-            fetched = res.fetchall()
-        added = len(fetched)
-
-        # update user's last_synced_submission_id to the max id we just fetched
-        try:
-            max_id = max(int(r.get("id")) for r in submissions if (r.get("id") or r.get("submissionId")))
-        except ValueError:
-            max_id = None
-
-        if max_id is not None:
-            async with db.begin():
-                await db.execute(
-                    sa_update(User).where(User.handle == handle).values(last_synced_submission_id=max_id)
-                )
-
-        logger.info("sync_user_submissions: %d new submissions added for %s", added, handle)
-        return added
+    logger.info("sync_user_submissions: %d new submissions added for %s", inserted_count, handle)
+    return inserted_count

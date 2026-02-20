@@ -1,7 +1,11 @@
-from pydantic import BaseSettings
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Application settings loaded from environment variables and .env file."""
+
     PROJECT_NAME: str = "cp-analyser"
     DEBUG: bool = True
 
@@ -14,20 +18,23 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
 
-    # Auth
-    SECRET_KEY: str
+    # Auth - SECRET_KEY has a default fallback for testing
+    SECRET_KEY: str = "test-secret-key-change-in-production"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
 
 
-# Single global settings instance. Import `settings` from other modules for reuse.
-settings = Settings()
-
-
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return the global Settings instance. Kept for backward compatibility."""
-    return settings
+    """Get cached Settings instance.
+    
+    Uses @lru_cache to ensure only one Settings instance is created per application lifetime.
+    The .env file is automatically loaded on the first call.
+    Settings are then cached for the duration of the application.
+    """
+    return Settings()

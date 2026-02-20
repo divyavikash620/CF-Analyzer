@@ -2,12 +2,14 @@ from time import perf_counter
 import logging
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 
 from app.core.config import get_settings
 from app.routers.health import router as health_router
+from app.routers.analysis import router as analysis_router
 from app.utils.logging import setup_logging
 from app.clients.codeforces import make_codeforces_client
 
@@ -18,7 +20,15 @@ setup_logging()
 logger = logging.getLogger("app.middleware")
 
 app = FastAPI(title=settings.PROJECT_NAME)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(health_router)
+app.include_router(analysis_router)
 
 
 @app.on_event("startup")
