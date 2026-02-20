@@ -1,7 +1,8 @@
 from sqlalchemy.ext.asyncio import AsyncAttrs
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import DeclarativeBase
 
-# All ORM models should inherit from this `Base`.
-# Use `AsyncAttrs` so the mapped attributes are async-compatible
-# when using SQLAlchemy's async ORM (AsyncSession).
-Base = declarative_base(cls=AsyncAttrs)
+
+# Declarative base class for SQLAlchemy 2.0 style mappings.
+# Inheriting from `AsyncAttrs` makes mapped classes async-session friendly.
+class Base(AsyncAttrs, DeclarativeBase):
+	pass

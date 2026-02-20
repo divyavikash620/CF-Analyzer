@@ -31,8 +31,8 @@ async def _startup_codeforces_client() -> None:
 async def _shutdown_codeforces_client() -> None:
     c = getattr(app.state, "codeforces_client", None)
     if c is not None:
-        # underlying httpx.AsyncClient is available as _client
-        await c._client.aclose()
+        # close the client via its public API
+        await c.close()
 
 
 @app.exception_handler(IntegrityError)

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Optional
 
 from sqlalchemy import DateTime, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
@@ -18,6 +19,9 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     # optional Codeforces handle
     handle: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, unique=True)
+
+    # track last synced submission id from Codeforces
+    last_synced_submission_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # record creation timestamp with DB default
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

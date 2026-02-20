@@ -1,16 +1,18 @@
-from fastapi import Request, Depends
-
-from app.clients.codeforces import CodeforcesClient
+from fastapi import Request
 
 
-def get_codeforces_client(request: Request) -> CodeforcesClient:
-    """Dependency that returns the app-wide CodeforcesClient instance created on startup."""
+async def get_codeforces_client(request: Request):
+    """Async dependency that yields the app-wide CodeforcesClient when available.
+
+    If no app-wide client was initialized (startup not run), this will create a
+    short-lived client and ensure it is closed after the request using the
+    client's async context manager.
+    """
     client = getattr(request.app.state, "codeforces_client", None)
     if client is None:
-        # fallback: create a temporary client (not attached to app state)
-        # Note: callers that depend on the app-wide client should ensure the app
-        # startup handler ran; this fallback creates a short-lived client.
         from app.clients.codeforces import make_codeforces_client
 
-        return make_codeforces_client()
-    return client
+        async with make_codeforces_client() as c:
+            yield c
+    else:
+        yield client

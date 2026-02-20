@@ -4,14 +4,25 @@ import httpx
 
 
 class CodeforcesAPIError(Exception):
-    """Raised when Codeforces API responds with a non-OK status."""
+    """Raised when Codeforces API responds with a non-OK status or on request failures."""
 
 
 class CodeforcesClient:
     BASE_URL = "https://codeforces.com/api/"
 
-    def __init__(self, client: httpx.AsyncClient):
-        self._client = client
+    def __init__(self, timeout: float = 10.0):
+        timeout_cfg = httpx.Timeout(timeout, connect=5.0)
+        self._client = httpx.AsyncClient(base_url=self.BASE_URL, timeout=timeout_cfg)
+
+    async def close(self) -> None:
+        """Close the underlying httpx.AsyncClient."""
+        await self._client.aclose()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
 
     async def _get(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:
         try:
@@ -46,6 +57,9 @@ class CodeforcesClient:
 
 
 def make_codeforces_client(timeout: Optional[float] = 10.0) -> CodeforcesClient:
-    timeout_cfg = httpx.Timeout(timeout, connect=5.0)
-    client = httpx.AsyncClient(base_url=CodeforcesClient.BASE_URL, timeout=timeout_cfg)
-    return CodeforcesClient(client)
+    """Factory that returns a configured CodeforcesClient instance.
+
+    The caller is responsible for calling `await client.close()` or using
+    `async with make_codeforces_client() as client:`.
+    """
+    return CodeforcesClient(timeout=timeout)

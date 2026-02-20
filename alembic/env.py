@@ -9,7 +9,7 @@ from sqlalchemy import engine_from_config, pool
 # Ensure project root is importable
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from app.db.base import Base
+from app.db.database import Base
 from app.core.config import get_settings
 import app.models as app_models
 
